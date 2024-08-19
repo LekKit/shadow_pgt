@@ -194,7 +194,7 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
     return -1;
 }
 
-static noinline void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
+static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 {
 #ifdef __riscv
     // Disable interrupts in current context, set return mode to U-mode
