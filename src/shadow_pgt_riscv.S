@@ -28,6 +28,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define UCONTEXT_SIZE 256
 #endif
 
+# Trap handlers should be aligned to 4-byte boundary!
+.align 4
+
 # YEAH we are fucking going to copy this code into trampoline page
 .global shadow_pgt_trampoline_start
 shadow_pgt_trampoline_start:
