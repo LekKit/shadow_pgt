@@ -21,10 +21,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "shadow_pgt_uapi.h"
 
-struct shadow_pgt_pin_page {
-    struct page* kdata;
-    void* kernel_va;
-    size_t phys;
+struct pgt_pin_page {
+    void*  virt; // Virtual page address in kernel space
+    size_t phys; // Physical page address
 };
 
 /*
@@ -65,9 +64,9 @@ void pgt_kvfree(void* ptr);
  * Pinning user pages
  */
 
-struct shadow_pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write);
+struct pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write);
 
-void pgt_release_user_page(struct shadow_pgt_pin_page* pin_page);
+void pgt_release_user_page(struct pgt_pin_page* u_page);
 
 /*
  * Shadow pagetable internal APIs

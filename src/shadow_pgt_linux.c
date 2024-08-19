@@ -42,6 +42,11 @@ MODULE_LICENSE("GPL");
 
 #include <asm/io.h>         // virt_to_phys()
 
+struct pgt_pin_page_linux {
+    struct pgt_pin_page map;
+    struct page* page;
+};
+
 int pgt_resched(void)
 {
     if (need_resched()) {
@@ -96,28 +101,30 @@ void pgt_kvfree(void* ptr)
     }
 }
 
-struct shadow_pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write)
+struct pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write)
 {
     struct page* page = NULL;
-    struct shadow_pgt_pin_page* pin_page = pgt_kvzalloc(sizeof(struct shadow_pgt_pin_page));
+    struct pgt_pin_page_linux* pin_page = pgt_kvzalloc(sizeof(struct pgt_pin_page_linux));
     if (!pin_page) {
+        // Allocation failure
         return NULL;
     }
     if (get_user_pages_fast(uaddr, 1, write, &page) != 1) {
+        // Failed to pin userspace page
         pgt_kvfree(pin_page);
         return NULL;
     }
-    pin_page->kdata = page;
-    pin_page->kernel_va = kmap(page);
-    pin_page->phys = pgt_virt_to_phys(pin_page->kernel_va);
-    return pin_page;
+    pin_page->page = page;
+    pin_page->map.virt = kmap(page);
+    pin_page->map.phys = pgt_virt_to_phys(pin_page->map.virt);
+    return (struct pgt_pin_page*)pin_page;
 }
 
-void pgt_release_user_page(struct shadow_pgt_pin_page* pin_page)
+void pgt_release_user_page(struct pgt_pin_page* u_page)
 {
-    struct page* page = pin_page->kdata;
-    kunmap(page);
-    put_page(page);
+    struct pgt_pin_page_linux* pin_page = (struct pgt_pin_page_linux*)u_page;
+    kunmap(pin_page->page);
+    put_page(pin_page->page);
     pgt_kvfree(pin_page);
 }
 
