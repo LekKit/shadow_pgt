@@ -222,6 +222,7 @@ static int __init shadow_pgt_init_module(void)
 
     size_t trampoline_size = (size_t)(&shadow_pgt_trampoline_end - &shadow_pgt_trampoline_start);
     printk(KERN_ERR "shadow_pgt: Trampoline size: %ld bytes\n", trampoline_size);
+    printk(KERN_ERR "shadow_pgt: shadow_ucontext size: %ld bytes\n", sizeof(struct shadow_ucontext));
 
     return 0;
 }
@@ -229,6 +230,8 @@ static int __init shadow_pgt_init_module(void)
 static void __exit shadow_pgt_exit_module(void)
 {
     misc_deregister(&shadow_pgt_cdevsw);
+
+    printk(KERN_ERR "shadow_pgt: K thx bye\n");
 }
 
 module_init(shadow_pgt_init_module);
