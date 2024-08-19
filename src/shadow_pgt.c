@@ -22,6 +22,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #error shadow_pgt is a riscv64-only kernel module for now!
 #endif
 
+#define compiler_barrier() __asm__ __volatile__ ("" : : : "memory")
+
 #ifdef __riscv
 
 #define CSR_SSTATUS  0x100
@@ -39,73 +41,168 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define CSR_READ(csr, v)                       \
 __asm__ __volatile__ ("csrr %0, " CSR_ASM(csr) \
               : "=r" (v) :                     \
-              : "memory");
+              : "memory")
 
 #define CSR_WRITE(csr, v)                          \
 __asm__ __volatile__ ("csrw " CSR_ASM(csr) ", %0" \
               : : "rK" (v)                         \
-              : "memory");
+              : "memory")
 
 #define CSR_SWAP(csr, v)                               \
 __asm__ __volatile__ ("csrrw %0, " CSR_ASM(csr) ", %1" \
               : "=r" (v) : "rK" (v)                    \
-              : "memory");
+              : "memory")
 
 #define CSR_SETBITS(csr, v)                            \
 __asm__ __volatile__ ("csrrs %0, " CSR_ASM(csr) ", %1" \
               : "=r" (v) : "rK" (v)                    \
-              : "memory");
+              : "memory")
 
 #define CSR_CLEARBITS(csr, v)                          \
 __asm__ __volatile__ ("csrrc %0, " CSR_ASM(csr) ", %1" \
               : "=r" (v) : "rK" (v)                    \
-              : "memory");
+              : "memory")
 
 #endif
 
+/*
+ * Each pagetable page is doubled:
+ * - First goes actual RISC-V pagetable page
+ * - AFter it, the page which holds virtual kernel addresses to it's child pages
+ */
+
+#define MMU_VALID_PTE     0x1
+#define MMU_READ          0x2
+#define MMU_WRITE         0x4
+#define MMU_EXEC          0x8
+#define MMU_LEAF_PTE      0xA
+#define MMU_USER_USABLE   0x10
+#define MMU_GLOBAL_MAP    0x20
+#define MMU_PAGE_ACCESSED 0x40
+#define MMU_PAGE_DIRTY    0x80
+
+#define MMU_PAGE_SHIFT    12
+#define MMU_PAGE_MASK     0xFFF
+#define MMU_PAGE_SIZE     0x1000
+#define MMU_PAGE_PNMASK   (~0xFFFULL)
+
+#define SV64_VPN_BITS     9
+#define SV64_VPN_MASK     0x1FF
+#define SV64_PHYS_BITS    56
+#define SV64_PHYS_MASK    bit_mask(SV64_PHYS_BITS)
+
+#define SV39_LEVELS       3
+#define SV48_LEVELS       4
+#define SV57_LEVELS       5
+
+#define SV_LEVELS SV39_LEVELS
+
+#define PAGETABLE_PTES 512
+
+static inline uint64_t sign_extend(uint64_t val, uint8_t bits)
+{
+    return ((int64_t)(val << (64 - bits))) >> (64 - bits);
+}
+/*
+static pgt_pte_t* pgt_get_page_pte(struct shadow_pgt* pgt, size_t vaddr)
+{
+    uint8_t bit_off = (SV_LEVELS * SV64_VPN_BITS) + MMU_PAGE_SHIFT - SV64_VPN_BITS;
+    pgt_pte_t* pagetable = pgt->pagetable;
+
+    for (size_t i = 0; i < SV_LEVELS; ++i) {
+        size_t pgt_entry = (vaddr >> bit_off) & SV64_VPN_MASK;
+        pgt_pte_t pte = pagetable[pgt_entry];
+        if (pte & MMU_VALID_PTE) {
+
+        }
+
+
+        bit_off -= SV64_VPN_BITS;
+    }
+}
+*/
+static void pgt_free_pagetable(pgt_pte_t* pagetable)
+{
+    for (size_t i = 0; i < PAGETABLE_PTES; ++i) {
+        pgt_pte_t pte = pagetable[i];
+        if (pte & MMU_VALID_PTE) {
+            if (pte & MMU_LEAF_PTE) {
+                // Release a pinned user page
+                struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
+                pgt_release_user_page(pin_page);
+            } else {
+                // Free pagetable level
+                pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
+                pgt_free_pagetable(next_pagetable);
+            }
+        }
+    }
+    pgt_free_pages(pagetable, 2);
+}
+
 struct shadow_pgt* shadow_pgt_init(void)
 {
+    pgt_debug_print("+shadow_pgt_init()");
     struct shadow_pgt* pgt = pgt_kvzalloc(sizeof(struct shadow_pgt));
+
+    pgt->pagetable = pgt_alloc_pages(2);
+
+    pgt_debug_print("-shadow_pgt_init()");
     return pgt;
 }
 
 void shadow_pgt_free(struct shadow_pgt* pgt)
 {
+    pgt_debug_print("+shadow_pgt_free()");
+    pgt_free_pagetable(pgt->pagetable);
     pgt_kvfree(pgt);
+    pgt_debug_print("-shadow_pgt_free()");
 }
 
 int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
+    if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
+        // Misaligned mapping
+        return -1;
+    }
+    if (sign_extend(map->vaddr, 39) != map->vaddr) {
+        // Non-canonical address for sv39
+        return -1;
+    }
+
     pgt_spin_lock(&pgt->lock);
+
     // TODO: Pagetable map
     pgt_spin_unlock(&pgt->lock);
-    return -22;
+    return -1;
 }
 
 int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
+    if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
+        // Misaligned mapping
+        return -1;
+    }
+    if (sign_extend(map->vaddr, 39) != map->vaddr) {
+        // Non-canonical address for sv39
+        return -1;
+    }
+
     pgt_spin_lock(&pgt->lock);
     // TODO: Pagetable unmap
     pgt_spin_unlock(&pgt->lock);
-    return -22;
+    return -1;
 }
 
 static noinline void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 {
 #ifdef __riscv
-    // Disable interrupts in current context
-    size_t sstatus = CSR_SSTATUS_SIE;
+    // Disable interrupts in current context, set return mode to U-mode
+    size_t sstatus = CSR_SSTATUS_SIE | CSR_SSTATUS_SPIE | CSR_SSTATUS_SPP;
     CSR_CLEARBITS(CSR_SSTATUS, sstatus);
 
     // Save previous sstatus
     pgt->sstatus = sstatus;
-
-    // Enable interrupts for return context
-    sstatus |= CSR_SSTATUS_SPIE;
-
-    // Set return to U-mode
-    sstatus &= ~CSR_SSTATUS_SPP;
-    CSR_WRITE(CSR_SSTATUS, sstatus);
 
     // Save host kernel satp
     CSR_READ(CSR_SATP, pgt->satp);
@@ -123,12 +220,14 @@ static noinline void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     // TODO: Actual shadow pagetable allocation
     pgt->shadow_satp = pgt->satp;
 
-    pgt_debug_print("Entering shadow land...");
+    //pgt_debug_print("Entering shadow land...");
 
     // Enter asm routine to switch satp & ucontext into shadow land...
+    compiler_barrier();
     shadow_pgt_enter_trampoline(pgt);
+    compiler_barrier();
 
-    pgt_debug_print("Returning to host kernel...");
+    //pgt_debug_print("Returning to host kernel...");
 
     // Restore host kernel S-mode state
     CSR_WRITE(CSR_STVEC, pgt->stvec);
