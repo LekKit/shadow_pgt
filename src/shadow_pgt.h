@@ -69,6 +69,13 @@ struct pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write);
 void pgt_release_user_page(struct pgt_pin_page* u_page);
 
 /*
+ * Allocation helpers
+ */
+
+#define alloc_new_obj(type) ((type*)pgt_kvzalloc(sizeof(type)))
+#define alloc_new_arr(type, size) ((type*)pgt_kvzalloc(size * sizeof(type)))
+
+/*
  * Good old spinlock
  */
 
@@ -94,6 +101,8 @@ static forceinline void pgt_spin_unlock(struct pgt_spinlock* lock)
  * Shadow pagetable internal APIs
  */
 
+typedef size_t pgt_pte_t;
+
 struct shadow_pgt {
     struct shadow_ucontext uctx;
     struct shadow_ucontext sctx;
@@ -109,6 +118,7 @@ struct shadow_pgt {
     size_t sepc;
 #endif
     struct pgt_spinlock lock;
+    pgt_pte_t* pagetable;
 };
 
 struct shadow_pgt* shadow_pgt_init(void);
