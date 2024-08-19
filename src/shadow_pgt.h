@@ -69,6 +69,28 @@ struct pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write);
 void pgt_release_user_page(struct pgt_pin_page* u_page);
 
 /*
+ * Good old spinlock
+ */
+
+// Please always zero-initialize me!
+struct pgt_spinlock {
+    uint32_t flag;
+};
+
+#define forceinline inline __attribute__((__always_inline__))
+#define noinline __attribute__((__noinline__))
+
+static forceinline void pgt_spin_lock(struct pgt_spinlock* lock)
+{
+    while (__atomic_exchange_n(&lock->flag, 1, __ATOMIC_ACQUIRE)) {}
+}
+
+static forceinline void pgt_spin_unlock(struct pgt_spinlock* lock)
+{
+    __atomic_store_n(&lock->flag, 0, __ATOMIC_RELEASE);
+}
+
+/*
  * Shadow pagetable internal APIs
  */
 
@@ -86,6 +108,7 @@ struct shadow_pgt {
     size_t stvec;
     size_t sepc;
 #endif
+    struct pgt_spinlock lock;
 };
 
 struct shadow_pgt* shadow_pgt_init(void);

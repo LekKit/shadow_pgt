@@ -76,17 +76,22 @@ void shadow_pgt_free(struct shadow_pgt* pgt)
 
 int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
+    pgt_spin_lock(&pgt->lock);
+    // TODO: Pagetable map
+    pgt_spin_unlock(&pgt->lock);
     return -22;
 }
 
 int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
+    pgt_spin_lock(&pgt->lock);
+    // TODO: Pagetable unmap
+    pgt_spin_unlock(&pgt->lock);
     return -22;
 }
 
-int shadow_pgt_enter(struct shadow_pgt* pgt)
+static noinline void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 {
-    pgt_debug_print("+shadow_pgt_enter()");
 #ifdef __riscv
     // Disable interrupts in current context
     size_t sstatus = CSR_SSTATUS_SIE;
@@ -141,6 +146,14 @@ int shadow_pgt_enter(struct shadow_pgt* pgt)
     // Restore actual initial host kernel sstatus
     CSR_WRITE(CSR_SSTATUS, pgt->sstatus);
 #endif
+}
+
+int shadow_pgt_enter(struct shadow_pgt* pgt)
+{
+    pgt_spin_lock(&pgt->lock);
+    pgt_debug_print("+shadow_pgt_enter()");
+    shadow_pgt_enter_internal(pgt);
     pgt_debug_print("-shadow_pgt_enter()");
+    pgt_spin_unlock(&pgt->lock);
     return 0;
 }
