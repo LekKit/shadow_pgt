@@ -16,8 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#ifndef SHADOW_PGT_UAPI
-#define SHADOW_PGT_UAPI
+#ifndef SHADOW_PGT_UAPI_H
+#define SHADOW_PGT_UAPI_H
 
 #ifdef __KERNEL__
 #include <linux/types.h>
