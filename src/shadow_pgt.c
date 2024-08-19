@@ -103,6 +103,7 @@ static inline uint64_t sign_extend(uint64_t val, uint8_t bits)
 {
     return ((int64_t)(val << (64 - bits))) >> (64 - bits);
 }
+
 /*
 static pgt_pte_t* pgt_get_page_pte(struct shadow_pgt* pgt, size_t vaddr)
 {
@@ -121,23 +122,37 @@ static pgt_pte_t* pgt_get_page_pte(struct shadow_pgt* pgt, size_t vaddr)
     }
 }
 */
-static void pgt_free_pagetable(pgt_pte_t* pagetable)
+
+static inline size_t pgt_vpn2_shifted(size_t virt)
+{
+    const uint8_t bit_off = (SV_LEVELS * SV64_VPN_BITS) + MMU_PAGE_SHIFT - SV64_VPN_BITS;
+    return (virt >> bit_off) & 0xFFF;
+}
+
+static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t virt_end, bool free)
 {
     for (size_t i = 0; i < PAGETABLE_PTES; ++i) {
-        pgt_pte_t pte = pagetable[i];
-        if (pte & MMU_VALID_PTE) {
-            if (pte & MMU_LEAF_PTE) {
-                // Release a pinned user page
-                struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
-                pgt_release_user_page(pin_page);
-            } else {
-                // Free pagetable level
-                pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
-                pgt_free_pagetable(next_pagetable);
+        if (pgt_vpn2_shifted(virt_start) <= i && pgt_vpn2_shifted(virt_end) >= i) {
+            pgt_pte_t pte = pagetable[i];
+            pagetable[i] = 0;
+            if (pte & MMU_VALID_PTE) {
+                if (pte & MMU_LEAF_PTE) {
+                    // Release a pinned user page
+                    struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
+                    pgt_release_user_page(pin_page);
+                } else {
+                    // Free pagetable level
+                    pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
+                    pgt_free_pagetable(next_pagetable, virt_start << SV64_VPN_BITS, virt_end << SV64_VPN_BITS, true);
+                }
             }
         }
     }
-    pgt_free_pages(pagetable, 2);
+
+    if (free && pgt_vpn2_shifted(virt_start) == 0 && pgt_vpn2_shifted(virt_end) == 0xFFF) {
+        pgt_debug_print("pgt_free_pages()");
+        pgt_free_pages(pagetable, 2);
+    }
 }
 
 struct shadow_pgt* shadow_pgt_init(void)
@@ -154,7 +169,7 @@ struct shadow_pgt* shadow_pgt_init(void)
 void shadow_pgt_free(struct shadow_pgt* pgt)
 {
     pgt_debug_print("+shadow_pgt_free()");
-    pgt_free_pagetable(pgt->pagetable);
+    pgt_free_pagetable(pgt->pagetable, 0, -1ULL, true);
     pgt_kvfree(pgt);
     pgt_debug_print("-shadow_pgt_free()");
 }
@@ -189,7 +204,9 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
     }
 
     pgt_spin_lock(&pgt->lock);
-    // TODO: Pagetable unmap
+
+    pgt_free_pagetable(pgt->pagetable, map->vaddr, map->vaddr + map->size - 1, false);
+
     pgt_spin_unlock(&pgt->lock);
     return -1;
 }
@@ -246,9 +263,9 @@ static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 int shadow_pgt_enter(struct shadow_pgt* pgt)
 {
     pgt_spin_lock(&pgt->lock);
-    pgt_debug_print("+shadow_pgt_enter()");
+    //pgt_debug_print("+shadow_pgt_enter()");
     shadow_pgt_enter_internal(pgt);
-    pgt_debug_print("-shadow_pgt_enter()");
+    //pgt_debug_print("-shadow_pgt_enter()");
     pgt_spin_unlock(&pgt->lock);
     return 0;
 }
