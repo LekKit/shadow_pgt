@@ -3,7 +3,9 @@ NAME := shadow_pgt
 KPATH := /lib/modules/$(shell uname -r)/build
 
 obj-m += shadow_pgt.o
-shadow_pgt-objs := ./src/shadow_pgt_linux.o ./src/shadow_pgt.o ./src/shadow_pgt_riscv.o
+shadow_pgt-objs := src/shadow_pgt_linux.o src/shadow_pgt.o src/shadow_pgt_riscv.o
+
+ccflags-y += -O2
 
 .PHONY: all
 all:
