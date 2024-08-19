@@ -89,7 +89,9 @@ struct pgt_spinlock {
 
 static forceinline void pgt_spin_lock(struct pgt_spinlock* lock)
 {
-    while (__atomic_exchange_n(&lock->flag, 1, __ATOMIC_ACQUIRE)) {}
+    while (__atomic_exchange_n(&lock->flag, 1, __ATOMIC_ACQUIRE)) {
+        pgt_resched();
+    }
 }
 
 static forceinline void pgt_spin_unlock(struct pgt_spinlock* lock)
