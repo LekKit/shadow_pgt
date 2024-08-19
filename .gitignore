@@ -1,0 +1,20 @@
+# Linux kernel module build garbage
+*.o
+*.o.*
+*.ko
+*.mod
+*.mod.*
+*.cmd
+*.order
+*.symvers
+
+# Kate editor temp files
+*.kate-swp
+
+# Other editors that people might use
+/.vscode/
+
+# Patches stuff
+/*.patch
+*.rej
+*.orig
