@@ -220,14 +220,10 @@ static noinline void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     // TODO: Actual shadow pagetable allocation
     pgt->shadow_satp = pgt->satp;
 
-    //pgt_debug_print("Entering shadow land...");
-
     // Enter asm routine to switch satp & ucontext into shadow land...
     compiler_barrier();
     shadow_pgt_enter_trampoline(pgt);
     compiler_barrier();
-
-    //pgt_debug_print("Returning to host kernel...");
 
     // Restore host kernel S-mode state
     CSR_WRITE(CSR_STVEC, pgt->stvec);
@@ -236,7 +232,7 @@ static noinline void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     CSR_SWAP(CSR_SSCRATCH, sscratch);
 
     // sscratch held guest a0
-    pgt->uctx.xreg[10] = sscratch;
+    pgt->uctx.xreg[9] = sscratch;
 
     // sepc held guest pc
     CSR_SWAP(CSR_SEPC, pgt->sepc);
