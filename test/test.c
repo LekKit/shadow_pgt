@@ -11,6 +11,8 @@ int main()
 {
     int pgt_fd = open("/dev/shadow_pgt", O_RDONLY);
 
+    printf("Size of shadow_ucontext: %d\n", (unsigned)sizeof(struct shadow_ucontext));
+
     if (pgt_fd < 0) {
         printf("Failed to open /dev/shadow_pgt: %s\n", strerror(errno));
         return -1;
