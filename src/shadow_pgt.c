@@ -302,42 +302,78 @@ void shadow_pgt_free(struct shadow_pgt* pgt)
 
 int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
+    int ret = 0;
+    struct shadow_map tmp = *map;
     if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
         // Misaligned mapping
-        return -1;
+        return -22;
     }
     if (sign_extend(map->vaddr, 39) != map->vaddr) {
         // Non-canonical address for sv39
-        return -1;
+        return -22;
     }
     if (!(map->flags & MMU_LEAF_PTE)) {
         // Tried to map non-leaf page!
-        return -1;
+        return -22;
     }
 
     pgt_spin_lock(&pgt->lock);
 
-    // TODO: Map range not 1 page
-    pgt_map_user_page(pgt->pagetable, map);
+    for (size_t i = 0; i < map->size; i += MMU_PAGE_SIZE) {
+        size_t vaddr = map->vaddr + i;
+        if (vaddr != (size_t)pgt && vaddr != (size_t)&shadow_pgt_trampoline_start) {
+            // Not overlapping kernel trampoline pages, good to go
+            tmp.vaddr = vaddr;
+            pgt_free_pagetable(pgt->pagetable, vaddr, vaddr, false);
+            pgt_map_user_page(pgt->pagetable, &tmp);
+        } else {
+            ret = -14;
+        }
+    }
 
     pgt_spin_unlock(&pgt->lock);
-    return 0;
+    return ret;
+}
+
+static void shadow_pgt_unmap_split(struct shadow_pgt* pgt, size_t virt_start, size_t virt_end)
+{
+    size_t virt_pgt = (size_t)pgt;
+    size_t virt_code = (size_t)&shadow_pgt_trampoline_start;
+    if (virt_start <= virt_pgt && virt_end >= virt_pgt) {
+        // Split unmapping around trampoline state page
+        if (virt_start < virt_pgt) {
+            shadow_pgt_unmap_split(pgt, virt_start, virt_pgt - MMU_PAGE_SIZE);
+        }
+        if (virt_end > virt_pgt) {
+            shadow_pgt_unmap_split(pgt, virt_pgt + MMU_PAGE_SIZE, virt_end);
+        }
+    } else if (virt_start <= virt_code && virt_end >= virt_code) {
+        // Split unmapping around trampoline code page
+        if (virt_start < virt_code) {
+            shadow_pgt_unmap_split(pgt, virt_start, virt_code - MMU_PAGE_SIZE);
+        }
+        if (virt_end > virt_code) {
+            shadow_pgt_unmap_split(pgt, virt_code + MMU_PAGE_SIZE, virt_end);
+        }
+    } else {
+        pgt_free_pagetable(pgt->pagetable, virt_start, virt_end, false);
+    }
 }
 
 int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
     if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
         // Misaligned mapping
-        return -1;
+        return -22;
     }
     if (sign_extend(map->vaddr, 39) != map->vaddr) {
         // Non-canonical address for sv39
-        return -1;
+        return -22;
     }
 
     pgt_spin_lock(&pgt->lock);
 
-    pgt_free_pagetable(pgt->pagetable, map->vaddr, map->vaddr + map->size - 1, false);
+    shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size - MMU_PAGE_SIZE);
 
     pgt_spin_unlock(&pgt->lock);
     return 0;
