@@ -28,13 +28,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define UCONTEXT_SIZE 256
 #endif
 
-# Trap handlers should be aligned to 4-byte boundary!
-.align 4
-
 # YEAH we are fucking going to copy this code into trampoline page
+.balign 4096
 .global shadow_pgt_trampoline_start
 shadow_pgt_trampoline_start:
 
+# Trap handlers should be aligned to 4-byte boundary!
+.align 4
 .global shadow_pgt_trap_handler
 shadow_pgt_trap_handler:
     # Pointer to shadow_pgt is held in sscratch
@@ -168,5 +168,6 @@ shadow_pgt_enter_trampoline:
     # This enables interrupts, we will eventually trap into shadow_pgt_trap_handler
     sret
 
+.balign 4096
 .global shadow_pgt_trampoline_end
 shadow_pgt_trampoline_end:
