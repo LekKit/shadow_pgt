@@ -180,23 +180,34 @@ static inline size_t pgt_vpn2_shifted(size_t virt)
 }
 
 // Free pagetable entries and unmap pages from virt_start to virt_end
-static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t virt_end, bool free)
+static bool pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t virt_end, bool free)
 {
+    if (pagetable == NULL) {
+        return false;
+    }
+
     for (size_t i = 0; i < PAGETABLE_PTES; ++i) {
         if (pgt_vpn2_shifted(virt_start) <= i && pgt_vpn2_shifted(virt_end) >= i) {
             pgt_pte_t pte = pagetable[i];
-            pagetable[i] = 0;
+
             if (pte & MMU_VALID_PTE) {
                 if (pte & MMU_LEAF_PTE) {
                     if (pte & MMU_USER_USABLE) {
                         // Release a pinned user page
                         struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
+                        pagetable[PAGETABLE_PTES + i] = 0;
                         pgt_release_user_page(pin_page);
+                        // Unmap user page PTE
+                        pagetable[i] = 0;
                     }
                 } else {
                     // Free pagetable level
                     pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
-                    pgt_free_pagetable(next_pagetable, virt_start << SV64_VPN_BITS, virt_end << SV64_VPN_BITS, true);
+                    pagetable[PAGETABLE_PTES + i] = 0;
+                    if (pgt_free_pagetable(next_pagetable, virt_start << SV64_VPN_BITS, virt_end << SV64_VPN_BITS, true)) {
+                        // Unmap pagetable PTE
+                        pagetable[i] = 0;
+                    }
                 }
             }
         }
@@ -206,7 +217,9 @@ static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
         // Free whole pagetable level
         pgt_debug_print("Freeing pagetable level");
         pgt_free_pages(pagetable, 2);
+        return true;
     }
+    return false;
 }
 
 struct shadow_pgt* shadow_pgt_init(void)
