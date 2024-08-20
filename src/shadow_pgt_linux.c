@@ -153,33 +153,33 @@ static int shadow_pgt_release(struct inode* inode, struct file* filp)
 
 static long shadow_pgt_ioctl(struct file* filp, unsigned int cmd, unsigned long data)
 {
-    // TODO: Locking!!!
     struct shadow_pgt* pgt = filp->private_data;
 
     switch (cmd) {
-        case SHADOW_PGT_MAP:
+        case SHADOW_PGT_MAP: {
+            struct shadow_map map = {0};
+            if (copy_from_user(&map, (void*)data, sizeof(struct shadow_map))) {
+                // Failed to copy struct shadow_map from userland
+                return -EFAULT;
+            }
+            if (!access_ok(map.uaddr, map.size)) {
+                // map.uaddr points outside of user address space
+                return -EFAULT;
+            }
+            return shadow_pgt_map(pgt, &map);
+        }
         case SHADOW_PGT_UNMAP: {
             struct shadow_map map = {0};
             if (copy_from_user(&map, (void*)data, sizeof(struct shadow_map))) {
                 // Failed to copy struct shadow_map from userland
-                return -EINVAL;
+                return -EFAULT;
             }
-            if (!access_ok(map.uaddr, map.size)) {
-                // map.uaddr points outside of user address space
-                return -EINVAL;
-            }
-            switch (cmd) {
-                case SHADOW_PGT_MAP:
-                    return shadow_pgt_map(pgt, &map);
-                case SHADOW_PGT_UNMAP:
-                    return shadow_pgt_unmap(pgt, &map);
-            }
-            return -EINVAL;
+            return shadow_pgt_unmap(pgt, &map);
         }
         case SHADOW_PGT_ENTER: {
             if (copy_from_user(&pgt->uctx, (void*)data, sizeof(struct shadow_ucontext))) {
                 // Failed to copy struct shadow_ucontext from userland
-                return -EINVAL;
+                return -EFAULT;
             }
             int ret = shadow_pgt_enter(pgt);
             if (ret != 0) {
@@ -187,7 +187,7 @@ static long shadow_pgt_ioctl(struct file* filp, unsigned int cmd, unsigned long 
                 return ret;
             }
             if (copy_to_user((void*)data, &pgt->uctx, sizeof(struct shadow_ucontext))) {
-                return -EINVAL;
+                return -EFAULT;
             }
             return 0;
         }
