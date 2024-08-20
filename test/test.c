@@ -20,10 +20,18 @@ int main()
 
     printf("Opened /dev/shadow_pgt!\n");
 
+    struct shadow_map map = {
+        .vaddr = 0,
+        .size = ~0xFFFULL,
+    };
+
+    if (ioctl(pgt_fd, SHADOW_PGT_UNMAP, &map)) {
+        printf("ioctl(SHADOW_PGT_UNMAP) failed: %s\n", strerror(errno));
+    }
+
     struct shadow_ucontext ctx = {0};
 
-    int ret = ioctl(pgt_fd, SHADOW_PGT_ENTER, &ctx);
-    if (ret != 0) {
+    if (ioctl(pgt_fd, SHADOW_PGT_ENTER, &ctx)) {
         printf("ioctl(SHADOW_PGT_ENTER) failed: %s\n", strerror(errno));
     }
 
