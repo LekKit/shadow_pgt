@@ -118,6 +118,7 @@ struct shadow_pgt {
     size_t sscratch;
     size_t stvec;
     size_t sepc;
+    size_t scounteren;
 #endif
     struct pgt_spinlock lock;
     pgt_pte_t* pagetable;

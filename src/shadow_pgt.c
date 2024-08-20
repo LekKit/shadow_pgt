@@ -26,11 +26,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #ifdef __riscv
 
-#define CSR_SSTATUS  0x100
-#define CSR_STVEC    0x105
-#define CSR_SSCRATCH 0x140
-#define CSR_SEPC     0x141
-#define CSR_SATP     0x180
+#define CSR_SSTATUS    0x100
+#define CSR_STVEC      0x105
+#define CSR_SCOUNTEREN 0x106
+#define CSR_SSCRATCH   0x140
+#define CSR_SEPC       0x141
+#define CSR_SATP       0x180
 
 #define CSR_SSTATUS_SIE  0x2ULL
 #define CSR_SSTATUS_SPIE 0x20ULL
@@ -114,20 +115,23 @@ static pgt_pte_t* pgt_alloc_page_pte(pgt_pte_t* pagetable, size_t vaddr)
         if (i == 0) {
             return &pagetable[pgt_entry];
         } else {
-            pgt_pte_t pte = pagetable[pgt_entry];
-            if (!(pte & MMU_VALID_PTE)) {
+            void* next_pagetable = (void*)pagetable[PAGETABLE_PTES + pgt_entry];
+            if (next_pagetable) {
+                pagetable = next_pagetable;
+            } else {
                 // Allocate pagetable level
-                void* table = pgt_alloc_pages(2);
-                if (table) {
-                    size_t table_phys = pgt_virt_to_phys(table);
-                    pagetable[PAGETABLE_PTES + pgt_entry] = (pgt_pte_t)table;
+                next_pagetable = pgt_alloc_pages(2);
+                if (next_pagetable) {
+                    // Map magetable level
+                    size_t table_phys = pgt_virt_to_phys(next_pagetable);
+                    pagetable[PAGETABLE_PTES + pgt_entry] = (pgt_pte_t)next_pagetable;
                     pagetable[pgt_entry] = ((table_phys & MMU_PAGE_PNMASK) >> 2) | MMU_VALID_PTE;
+                    pagetable = next_pagetable;
                 } else {
                     // Allocation failure
                     return NULL;
                 }
             }
-            pagetable = (void*)pagetable[PAGETABLE_PTES + pgt_entry];
         }
         bit_off -= SV64_VPN_BITS;
     }
@@ -143,6 +147,7 @@ static bool pgt_map_user_page(pgt_pte_t* pagetable, const struct shadow_map* map
         // Failed to pin user page
         return false;
     }
+
     pgt_pte_t* pte = pgt_alloc_page_pte(pagetable, map->vaddr);
     if (pte == NULL) {
         // Failed to allocate PTE
@@ -215,7 +220,7 @@ static bool pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
 
     if (free && pgt_vpn2_shifted(virt_start) == 0 && pgt_vpn2_shifted(virt_end) == 0xFFF) {
         // Free whole pagetable level
-        pgt_debug_print("Freeing pagetable level");
+        //pgt_debug_print("Freeing pagetable level");
         pgt_free_pages(pagetable, 2);
         return true;
     }
@@ -319,25 +324,30 @@ int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
     struct shadow_map tmp = *map;
     if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
         // Misaligned mapping
+        pgt_debug_print("Misaligned mapping!");
         return -22;
     }
     if (sign_extend(map->vaddr, 39) != map->vaddr) {
         // Non-canonical address for sv39
+        pgt_debug_print("Non-canonical address!");
         return -22;
     }
     if (!(map->flags & MMU_LEAF_PTE)) {
         // Tried to map non-leaf page!
+        pgt_debug_print("Non-leaf page!");
         return -22;
     }
 
     pgt_spin_lock(&pgt->lock);
 
+    size_t virt_pgt = (size_t)pgt;
+    size_t virt_code = (size_t)&shadow_pgt_trampoline_start;
     for (size_t i = 0; i < map->size; i += MMU_PAGE_SIZE) {
         size_t vaddr = map->vaddr + i;
-        if (vaddr != (size_t)pgt && vaddr != (size_t)&shadow_pgt_trampoline_start) {
+        if (vaddr != virt_pgt && vaddr != virt_code) {
             // Not overlapping kernel trampoline pages, good to go
             tmp.vaddr = vaddr;
-            pgt_free_pagetable(pgt->pagetable, vaddr, vaddr, false);
+            //pgt_free_pagetable(pgt->pagetable, vaddr, vaddr, false);
             pgt_map_user_page(pgt->pagetable, &tmp);
         } else {
             ret = -14;
@@ -377,16 +387,45 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
     if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
         // Misaligned mapping
-        return -22;
-    }
-    if (sign_extend(map->vaddr, 39) != map->vaddr) {
-        // Non-canonical address for sv39
+        pgt_debug_print("Misaligned mapping!");
         return -22;
     }
 
     pgt_spin_lock(&pgt->lock);
 
-    shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size - MMU_PAGE_SIZE);
+    // TODO: Remove this shit
+    pgt_free_pagetable(pgt->pagetable, 0, -1, false);
+    // Map trampoline code into shadow pagetable
+    struct shadow_map trampoline_code = {
+        .uaddr = pgt->shadow_trampoline_page,
+        .vaddr = (size_t)&shadow_pgt_trampoline_start,
+        .size = MMU_PAGE_SIZE,
+        .flags = SHADOW_PGT_READ | SHADOW_PGT_EXEC,
+    };
+    if (!pgt_map_kernel_page(pgt->pagetable, &trampoline_code)) {
+        // Failed to map trampoline code page
+        pgt_debug_print("Failed to map trampoline code!");
+        shadow_pgt_free(pgt);
+        return -14;
+    }
+
+    // Map pgt context into shadow pagetable
+    struct shadow_map pgt_map = {
+        .uaddr = pgt,
+        .vaddr = (size_t)pgt,
+        .size = MMU_PAGE_SIZE,
+        .flags = SHADOW_PGT_READ | SHADOW_PGT_WRITE,
+    };
+    if (!pgt_map_kernel_page(pgt->pagetable, &pgt_map)) {
+        // Failed to map trampoline state page
+        pgt_debug_print("Failed to map trampoline state!");
+        shadow_pgt_free(pgt);
+        return -14;
+    }
+    // TODO: End of shit
+
+    // TODO make proper unmapper work
+    //shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size - MMU_PAGE_SIZE);
 
     pgt_spin_unlock(&pgt->lock);
     return 0;
@@ -401,6 +440,10 @@ static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 
     // Save previous sstatus
     pgt->sstatus = sstatus;
+
+    // Disable access to time CSR
+    pgt->scounteren = 0;
+    CSR_SWAP(CSR_SCOUNTEREN, pgt->scounteren);
 
     // Save host kernel satp
     CSR_READ(CSR_SATP, pgt->satp);
@@ -432,6 +475,9 @@ static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     // sepc held guest pc
     CSR_SWAP(CSR_SEPC, pgt->sepc);
     pgt->uctx.pc = pgt->sepc;
+
+    // Restore scounteren
+    CSR_WRITE(CSR_SCOUNTEREN, pgt->scounteren);
 
     // Restore actual initial host kernel sstatus
     CSR_WRITE(CSR_SSTATUS, pgt->sstatus);
