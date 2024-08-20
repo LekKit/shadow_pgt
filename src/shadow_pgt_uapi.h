@@ -53,6 +53,7 @@ struct shadow_ucontext {
 #define SHADOW_PGT_READ  0x2
 #define SHADOW_PGT_WRITE 0x4
 #define SHADOW_PGT_EXEC  0x8
+#define SHADOW_PGT_RWX   0xE
 
 /*
  * Shadow pagetable ioctls
