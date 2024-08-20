@@ -121,6 +121,7 @@ struct shadow_pgt {
 #endif
     struct pgt_spinlock lock;
     pgt_pte_t* pagetable;
+    void* shadow_trampoline_page;
 };
 
 struct shadow_pgt* shadow_pgt_init(void);

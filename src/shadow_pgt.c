@@ -104,24 +104,74 @@ static inline uint64_t sign_extend(uint64_t val, uint8_t bits)
     return ((int64_t)(val << (64 - bits))) >> (64 - bits);
 }
 
-/*
-static pgt_pte_t* pgt_get_page_pte(struct shadow_pgt* pgt, size_t vaddr)
+// Allocate PTEs for given virtual address in a pagetable
+static pgt_pte_t* pgt_alloc_page_pte(pgt_pte_t* pagetable, size_t vaddr)
 {
     uint8_t bit_off = (SV_LEVELS * SV64_VPN_BITS) + MMU_PAGE_SHIFT - SV64_VPN_BITS;
-    pgt_pte_t* pagetable = pgt->pagetable;
 
-    for (size_t i = 0; i < SV_LEVELS; ++i) {
+    for (size_t i = SV_LEVELS; i--;) {
         size_t pgt_entry = (vaddr >> bit_off) & SV64_VPN_MASK;
-        pgt_pte_t pte = pagetable[pgt_entry];
-        if (pte & MMU_VALID_PTE) {
-
+        if (i == 0) {
+            return &pagetable[pgt_entry];
+        } else {
+            pgt_pte_t pte = pagetable[pgt_entry];
+            if (!(pte & MMU_VALID_PTE)) {
+                // Allocate pagetable level
+                void* table = pgt_alloc_pages(2);
+                if (table) {
+                    size_t table_phys = pgt_virt_to_phys(table);
+                    pagetable[PAGETABLE_PTES + pgt_entry] = (pgt_pte_t)table;
+                    pagetable[pgt_entry] = ((table_phys & MMU_PAGE_PNMASK) >> 2) | MMU_VALID_PTE;
+                } else {
+                    // Allocation failure
+                    return NULL;
+                }
+            }
+            pagetable = (void*)pagetable[PAGETABLE_PTES + pgt_entry];
         }
-
-
         bit_off -= SV64_VPN_BITS;
     }
+    return NULL;
 }
-*/
+
+// Map userspace page into pagetable
+// TODO: Test this!
+static bool pgt_map_user_page(pgt_pte_t* pagetable, const struct shadow_map* map)
+{
+    struct pgt_pin_page* pin_page = pgt_pin_user_page((size_t)map->uaddr,  (map->flags & SHADOW_PGT_WRITE));
+    if (pin_page == NULL) {
+        // Failed to pin user page
+        return false;
+    }
+    pgt_pte_t* pte = pgt_alloc_page_pte(pagetable, map->vaddr);
+    if (pte == NULL) {
+        // Failed to allocate PTE
+        pgt_release_user_page(pin_page);
+        return false;
+    }
+
+    pgt_pte_t flags = MMU_VALID_PTE | MMU_USER_USABLE | MMU_PAGE_ACCESSED | MMU_PAGE_DIRTY | (map->flags & SHADOW_PGT_RWX);
+    *pte = ((pin_page->phys & MMU_PAGE_PNMASK) >> 2) | flags;
+    pte[PAGETABLE_PTES] = (pgt_pte_t)pin_page;
+    return true;
+}
+
+// Map kernel page into pagetable, uaddr is used as kernel virtual address
+// DO NOT EVER PASS KERNEL SYMBOL ADDRESSES HERE BECAUSE LINUX WILL FUCK EVERYTHING UP
+// Thanks Linux! (1)
+static bool pgt_map_kernel_page(pgt_pte_t* pagetable, const struct shadow_map* map)
+{
+    pgt_pte_t* pte = pgt_alloc_page_pte(pagetable, map->vaddr);
+    if (pte == NULL) {
+        // Failed to allocate PTE
+        return false;
+    }
+
+    size_t page_phys = pgt_virt_to_phys(map->uaddr);
+    pgt_pte_t flags = MMU_VALID_PTE | MMU_PAGE_ACCESSED | MMU_PAGE_DIRTY | (map->flags & SHADOW_PGT_RWX);
+    *pte = ((page_phys & MMU_PAGE_PNMASK) >> 2) | flags;
+    return true;
+}
 
 static inline size_t pgt_vpn2_shifted(size_t virt)
 {
@@ -129,6 +179,7 @@ static inline size_t pgt_vpn2_shifted(size_t virt)
     return (virt >> bit_off) & 0xFFF;
 }
 
+// Free pagetable entries and unmap pages from virt_start to virt_end
 static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t virt_end, bool free)
 {
     for (size_t i = 0; i < PAGETABLE_PTES; ++i) {
@@ -137,9 +188,11 @@ static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
             pagetable[i] = 0;
             if (pte & MMU_VALID_PTE) {
                 if (pte & MMU_LEAF_PTE) {
-                    // Release a pinned user page
-                    struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
-                    pgt_release_user_page(pin_page);
+                    if (pte & MMU_USER_USABLE) {
+                        // Release a pinned user page
+                        struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
+                        pgt_release_user_page(pin_page);
+                    }
                 } else {
                     // Free pagetable level
                     pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
@@ -150,7 +203,8 @@ static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
     }
 
     if (free && pgt_vpn2_shifted(virt_start) == 0 && pgt_vpn2_shifted(virt_end) == 0xFFF) {
-        pgt_debug_print("pgt_free_pages()");
+        // Free whole pagetable level
+        pgt_debug_print("Freeing pagetable level");
         pgt_free_pages(pagetable, 2);
     }
 }
@@ -158,9 +212,76 @@ static void pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
 struct shadow_pgt* shadow_pgt_init(void)
 {
     pgt_debug_print("+shadow_pgt_init()");
-    struct shadow_pgt* pgt = pgt_kvzalloc(sizeof(struct shadow_pgt));
+
+    size_t trampoline_size = (size_t)(&shadow_pgt_trampoline_end - &shadow_pgt_trampoline_start);
+    if (trampoline_size > MMU_PAGE_SIZE) {
+        pgt_debug_print("Trampoline code doesn't fit into page!!!");
+        return NULL;
+    }
+    if (sizeof(struct shadow_pgt) > MMU_PAGE_SIZE) {
+        pgt_debug_print("struct shadow_pgt doesn't fit into page!!!");
+        return NULL;
+    }
+
+    struct shadow_pgt* pgt = pgt_alloc_pages(1);
+    if (pgt == NULL) {
+        // Allocation failure
+        return NULL;
+    }
 
     pgt->pagetable = pgt_alloc_pages(2);
+    if (pgt->pagetable == NULL) {
+        // Allocation failure
+        shadow_pgt_free(pgt);
+        return NULL;
+    }
+
+    // Linux doesn't let us allocate executable pages so we can't randomize trampoline page...
+    // Thanks Linux! (2)
+    pgt->shadow_trampoline_page = pgt_alloc_pages(1);
+    if (pgt->shadow_trampoline_page == NULL) {
+        // Allocation failure
+        shadow_pgt_free(pgt);
+        return NULL;
+    }
+
+    // Ugly hack because Linux doesn't let us use memcpy on kernel code
+    // Thanks Linux! (3)
+    volatile char* trampoline_page = pgt->shadow_trampoline_page;
+    for (size_t i = 0; i < trampoline_size; ++i) {
+        trampoline_page[i] = ((volatile char*)(&shadow_pgt_trampoline_start))[i];
+    }
+
+    // Map trampoline code into shadow pagetable
+    struct shadow_map trampoline_code = {
+        .uaddr = pgt->shadow_trampoline_page,
+        .vaddr = (size_t)&shadow_pgt_trampoline_start,
+        .size = MMU_PAGE_SIZE,
+        .flags = SHADOW_PGT_READ | SHADOW_PGT_EXEC,
+    };
+    if (!pgt_map_kernel_page(pgt->pagetable, &trampoline_code)) {
+        // Failed to map trampoline code page
+        pgt_debug_print("Failed to map trampoline code!");
+        shadow_pgt_free(pgt);
+        return NULL;
+    }
+
+    // Map pgt context into shadow pagetable
+    struct shadow_map pgt_map = {
+        .uaddr = pgt,
+        .vaddr = (size_t)pgt,
+        .size = MMU_PAGE_SIZE,
+        .flags = SHADOW_PGT_READ | SHADOW_PGT_WRITE,
+    };
+    if (!pgt_map_kernel_page(pgt->pagetable, &pgt_map)) {
+        // Failed to map trampoline state page
+        pgt_debug_print("Failed to map trampoline state!");
+        shadow_pgt_free(pgt);
+        return NULL;
+    }
+
+    // Shadow pagetable uses SV39 MMU mode
+    pgt->shadow_satp = (pgt_virt_to_phys(pgt->pagetable) >> 12) | (8ULL << 60);
 
     pgt_debug_print("-shadow_pgt_init()");
     return pgt;
@@ -169,8 +290,13 @@ struct shadow_pgt* shadow_pgt_init(void)
 void shadow_pgt_free(struct shadow_pgt* pgt)
 {
     pgt_debug_print("+shadow_pgt_free()");
-    pgt_free_pagetable(pgt->pagetable, 0, -1ULL, true);
-    pgt_kvfree(pgt);
+    if (pgt->pagetable) {
+        pgt_free_pagetable(pgt->pagetable, 0, -1ULL, true);
+    }
+    if (pgt->shadow_trampoline_page) {
+        pgt_free_pages(pgt->shadow_trampoline_page, 1);
+    }
+    pgt_free_pages(pgt, 1);
     pgt_debug_print("-shadow_pgt_free()");
 }
 
@@ -184,12 +310,18 @@ int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
         // Non-canonical address for sv39
         return -1;
     }
+    if (!(map->flags & MMU_LEAF_PTE)) {
+        // Tried to map non-leaf page!
+        return -1;
+    }
 
     pgt_spin_lock(&pgt->lock);
 
-    // TODO: Pagetable map
+    // TODO: Map range not 1 page
+    pgt_map_user_page(pgt->pagetable, map);
+
     pgt_spin_unlock(&pgt->lock);
-    return -1;
+    return 0;
 }
 
 int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
@@ -208,7 +340,7 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
     pgt_free_pagetable(pgt->pagetable, map->vaddr, map->vaddr + map->size - 1, false);
 
     pgt_spin_unlock(&pgt->lock);
-    return -1;
+    return 0;
 }
 
 static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
@@ -233,9 +365,6 @@ static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     CSR_SWAP(CSR_SEPC, pgt->sepc);
     CSR_SWAP(CSR_STVEC, pgt->stvec);
     CSR_SWAP(CSR_SSCRATCH, pgt->sscratch);
-
-    // TODO: Actual shadow pagetable allocation
-    pgt->shadow_satp = pgt->satp;
 
     // Enter asm routine to switch satp & ucontext into shadow land...
     compiler_barrier();
