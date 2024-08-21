@@ -109,7 +109,12 @@ static pgt_pte_t* pgt_alloc_page_pte(pgt_pte_t* pagetable, size_t vaddr)
     for (size_t i = SV_LEVELS; i--;) {
         size_t pgt_entry = (vaddr >> bit_off) & SV64_VPN_MASK;
         if (i == 0) {
-            return &pagetable[pgt_entry];
+            if (pagetable[pgt_entry]) {
+                pgt_debug_print("Page vaddr is already claimed!");
+                return NULL;
+            } else {
+                return &pagetable[pgt_entry];
+            }
         } else {
             void* next_pagetable = (void*)pagetable[PAGETABLE_PTES + pgt_entry];
             if (next_pagetable) {
@@ -177,7 +182,7 @@ static bool pgt_map_kernel_page(pgt_pte_t* pagetable, const struct shadow_map* m
 static inline size_t pgt_vpn2_shifted(size_t virt)
 {
     const uint8_t bit_off = (SV_LEVELS * SV64_VPN_BITS) + MMU_PAGE_SHIFT - SV64_VPN_BITS;
-    return (virt >> bit_off) & 0xFFF;
+    return (virt >> bit_off) & SV64_VPN_MASK;
 }
 
 // Free pagetable entries and unmap pages from virt_start to virt_end
@@ -187,39 +192,41 @@ static bool pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
         return false;
     }
 
-    for (size_t i = 0; i < PAGETABLE_PTES; ++i) {
-        if (pgt_vpn2_shifted(virt_start) <= i && pgt_vpn2_shifted(virt_end) >= i) {
-            pgt_pte_t pte = pagetable[i];
+    bool free_pgt_level = free && pgt_vpn2_shifted(virt_start) == 0 && pgt_vpn2_shifted(virt_end) == SV64_VPN_MASK;
+    for (size_t i = pgt_vpn2_shifted(virt_start); i <= pgt_vpn2_shifted(virt_end); ++i) {
+        pgt_pte_t pte = pagetable[i];
 
-            if (pte & MMU_VALID_PTE) {
-                if (pte & MMU_LEAF_PTE) {
-                    if (pte & MMU_USER_USABLE) {
-                        // Release a pinned user page
-                        struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
-                        pagetable[PAGETABLE_PTES + i] = 0;
-                        pgt_release_user_page(pin_page);
-                        // Unmap user page PTE
-                        pagetable[i] = 0;
-                    }
-                } else {
-                    // Free pagetable level
-                    pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
+        if (pte & MMU_VALID_PTE) {
+            if (pte & MMU_LEAF_PTE) {
+                if (pte & MMU_USER_USABLE) {
+                    // Release a pinned user page
+                    struct pgt_pin_page* pin_page = (void*)pagetable[PAGETABLE_PTES + i];
                     pagetable[PAGETABLE_PTES + i] = 0;
-                    if (pgt_free_pagetable(next_pagetable, virt_start << SV64_VPN_BITS, virt_end << SV64_VPN_BITS, true)) {
-                        // Unmap pagetable PTE
-                        pagetable[i] = 0;
-                    }
+                    pgt_release_user_page(pin_page);
+                    // Unmap user page PTE
+                    pagetable[i] = 0;
+                }
+            } else {
+                // Free pagetable level
+                pgt_pte_t* next_pagetable = (void*)pagetable[PAGETABLE_PTES + i];
+                if (pgt_free_pagetable(next_pagetable, virt_start << SV64_VPN_BITS, virt_end << SV64_VPN_BITS, true)) {
+                    // Unmap pagetable PTE
+                    pagetable[i] = 0;
+                    pagetable[PAGETABLE_PTES + i] = 0;
+                } else {
+                    // Keep parent pageteble level
+                    free_pgt_level = false;
                 }
             }
         }
     }
 
-    if (free && pgt_vpn2_shifted(virt_start) == 0 && pgt_vpn2_shifted(virt_end) == 0xFFF) {
+    if (free_pgt_level) {
         // Free whole pagetable level
-        //pgt_debug_print("Freeing pagetable level");
         pgt_free_pages(pagetable, 2);
         return true;
     }
+
     return false;
 }
 
@@ -307,7 +314,7 @@ void shadow_pgt_free(struct shadow_pgt* pgt)
 {
     pgt_debug_print("+shadow_pgt_free()");
     if (pgt->pagetable) {
-        pgt_free_pagetable(pgt->pagetable, 0, -1ULL, true);
+        pgt_free_pagetable(pgt->pagetable, 0, -1, true);
     }
     if (pgt->shadow_trampoline_page) {
         pgt_free_pages(pgt->shadow_trampoline_page, 1);
@@ -323,17 +330,17 @@ int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
     if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
         // Misaligned mapping
         pgt_debug_print("Misaligned mapping!");
-        return -22;
+        return -22; // EINVAL
     }
     if (sign_extend(map->vaddr, 39) != map->vaddr) {
         // Non-canonical address for sv39
         pgt_debug_print("Non-canonical address!");
-        return -22;
+        return -22; // EINVAL
     }
     if (!(map->flags & MMU_LEAF_PTE)) {
         // Tried to map non-leaf page!
         pgt_debug_print("Non-leaf page!");
-        return -22;
+        return -22; // EINVAL
     }
 
     pgt_spin_lock(&pgt->lock);
@@ -345,10 +352,14 @@ int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
         if (vaddr != virt_pgt && vaddr != virt_code) {
             // Not overlapping kernel trampoline pages, good to go
             tmp.vaddr = vaddr;
-            //pgt_free_pagetable(pgt->pagetable, vaddr, vaddr, false);
-            pgt_map_user_page(pgt->pagetable, &tmp);
+            pgt_free_pagetable(pgt->pagetable, vaddr, vaddr, false);
+            if (!pgt_map_user_page(pgt->pagetable, &tmp)) {
+                ret = -12; // ENOMEM
+            }
         } else {
-            ret = -14;
+            // TODO: Trampoline page should try to run away from collisions
+            pgt_debug_print("Don't touch my trampoline dammit!");
+            ret = -1; // EPERM
         }
     }
 
@@ -386,44 +397,13 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
     if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
         // Misaligned mapping
         pgt_debug_print("Misaligned mapping!");
-        return -22;
+        return -22; // EINVAL
     }
 
     pgt_spin_lock(&pgt->lock);
 
-    // TODO: Remove this shit
-    pgt_free_pagetable(pgt->pagetable, 0, -1, false);
-    // Map trampoline code into shadow pagetable
-    struct shadow_map trampoline_code = {
-        .uaddr = pgt->shadow_trampoline_page,
-        .vaddr = (size_t)&shadow_pgt_trampoline_start,
-        .size = MMU_PAGE_SIZE,
-        .flags = SHADOW_PGT_READ | SHADOW_PGT_EXEC,
-    };
-    if (!pgt_map_kernel_page(pgt->pagetable, &trampoline_code)) {
-        // Failed to map trampoline code page
-        pgt_debug_print("Failed to map trampoline code!");
-        shadow_pgt_free(pgt);
-        return -14;
-    }
-
-    // Map pgt context into shadow pagetable
-    struct shadow_map pgt_map = {
-        .uaddr = pgt,
-        .vaddr = (size_t)pgt,
-        .size = MMU_PAGE_SIZE,
-        .flags = SHADOW_PGT_READ | SHADOW_PGT_WRITE,
-    };
-    if (!pgt_map_kernel_page(pgt->pagetable, &pgt_map)) {
-        // Failed to map trampoline state page
-        pgt_debug_print("Failed to map trampoline state!");
-        shadow_pgt_free(pgt);
-        return -14;
-    }
-    // TODO: End of shit
-
     // TODO make proper unmapper work
-    //shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size - MMU_PAGE_SIZE);
+    shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size - MMU_PAGE_SIZE);
 
     pgt_spin_unlock(&pgt->lock);
     return 0;
