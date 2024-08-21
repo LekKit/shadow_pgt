@@ -148,5 +148,4 @@ void shadow_pgt_trap_handler(void);
 
 extern const char shadow_pgt_trampoline_end;
 
-
 #endif
