@@ -18,10 +18,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "shadow_pgt.h"
 
-#if !defined(__riscv) || __riscv_xlen != 64
-#error shadow_pgt is a riscv64-only kernel module for now!
-#endif
-
 #define compiler_barrier() __asm__ __volatile__ ("" : : : "memory")
 
 #ifdef __riscv
@@ -298,8 +294,10 @@ struct shadow_pgt* shadow_pgt_init(void)
         return NULL;
     }
 
+#ifdef __riscv
     // Shadow pagetable uses SV39 MMU mode
     pgt->shadow_satp = (pgt_virt_to_phys(pgt->pagetable) >> 12) | (8ULL << 60);
+#endif
 
     pgt_debug_print("-shadow_pgt_init()");
     return pgt;
@@ -481,6 +479,8 @@ static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 
     // Restore actual initial host kernel sstatus
     CSR_WRITE(CSR_SSTATUS, pgt->sstatus);
+#else
+    (void)pgt;
 #endif
 }
 

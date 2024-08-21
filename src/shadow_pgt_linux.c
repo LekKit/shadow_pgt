@@ -18,6 +18,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "shadow_pgt.h"
 
+#if !defined(__riscv) || __riscv_xlen != 64
+#error shadow_pgt is a riscv64-only kernel module for now!
+#endif
+
 /*
  * Module stuff headers
  */
