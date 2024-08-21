@@ -21,8 +21,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
  * and rebooting it each time.
  */
 
+#include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <sched.h>
 #include <sys/mman.h>
 
@@ -62,8 +64,11 @@ void pgt_free_pages(void* ptr, size_t npages)
         munmap(ptr, (npages << 12));
     }
 #else
-    pgt_kvfree(ptr);
-    (void)npages;
+    if (ptr) {
+        // Debug page presence
+        memset(ptr, 0, 12 << npages);
+        pgt_kvfree(ptr);
+    }
 #endif
 }
 
@@ -124,6 +129,52 @@ __asm__ (
 "shadow_pgt_trampoline_end:\n"
 );
 
+static uint64_t rvtimer_clocksource(uint64_t freq)
+{
+    struct timespec now = {0};
+    clock_gettime(CLOCK_REALTIME, &now);
+    return (now.tv_sec * freq) + (now.tv_nsec * freq / 1000000000ULL);
+}
+
+static void rvvm_randombytes(void* buffer, size_t size)
+{
+    // Xorshift RNG seeded by precise timer
+    static bool init = false;
+    static uint64_t seed = 0;
+    uint8_t* bytes = buffer;
+    size_t size_rem = size & 0x7;
+
+    if (!init) {
+        seed = rvtimer_clocksource(1000000000ULL);
+    }
+
+    size -= size_rem;
+    for (size_t i=0; i<size; i += 8) {
+        seed ^= (seed >> 17);
+        seed ^= (seed << 21);
+        seed ^= (seed << 28);
+        seed ^= (seed >> 49);
+        memcpy(bytes + i, &seed, 8);
+    }
+    seed ^= (seed >> 17);
+    seed ^= (seed << 21);
+    seed ^= (seed << 28);
+    seed ^= (seed >> 49);
+    memcpy(bytes + size, &seed, size_rem);
+}
+
+static inline uint64_t sign_extend(uint64_t val, uint8_t bits)
+{
+    return ((int64_t)(val << (64 - bits))) >> (64 - bits);
+}
+
+static size_t random_page(void)
+{
+    size_t random = 0;
+    rvvm_randombytes(&random, sizeof(random));
+    return sign_extend(random & ~0xFFFULL, 39);
+}
+
 int main()
 {
     struct shadow_pgt* pgt = shadow_pgt_init();
@@ -132,11 +183,61 @@ int main()
         return -1;
     }
 
-    struct shadow_map map = {
-        .vaddr = 0,
-        .size = ~0xFFFULL,
-    };
-    shadow_pgt_unmap(pgt, &map);
+    for (size_t t = 0; t < 10; ++t) {
+        for (size_t i = 0; i < 10000; ++i) {
+            struct shadow_map map = {
+                .vaddr = random_page(),
+                .size = 0x1000,
+                .flags = SHADOW_PGT_RWX,
+            };
+            if (shadow_pgt_map(pgt, &map)) {
+                pgt_debug_print("shadow_pgt_map() failed!");
+            }
+        }
+
+        for (size_t i = 0; i < 100000; ++i) {
+            struct shadow_map map = {
+                .vaddr = random_page(),
+                .size = 0x1000,
+                .flags = SHADOW_PGT_RWX,
+            };
+            if (shadow_pgt_unmap(pgt, &map)) {
+                pgt_debug_print("shadow_pgt_unmap() failed!");
+            }
+        }
+    }
+
+    {
+        struct shadow_map map = {
+            .vaddr = (size_t)&shadow_pgt_trampoline_start,
+            .size = 0x1000,
+            .flags = SHADOW_PGT_RWX,
+        };
+        if (shadow_pgt_map(pgt, &map)) {
+            pgt_debug_print("shadow_pgt_unmap() failed!");
+        }
+    }
+
+    {
+        struct shadow_map map = {
+            .vaddr = (size_t)pgt,
+            .size = 0x1000,
+            .flags = SHADOW_PGT_RWX,
+        };
+        if (shadow_pgt_map(pgt, &map)) {
+            pgt_debug_print("shadow_pgt_unmap() failed!");
+        }
+    }
+
+    {
+        struct shadow_map map = {
+            .vaddr = 0,
+            .size = ~0xFFFULL,
+        };
+        if (shadow_pgt_unmap(pgt, &map)) {
+            pgt_debug_print("shadow_pgt_unmap() failed!");
+        }
+    }
 
     shadow_pgt_free(pgt);
     return 0;
