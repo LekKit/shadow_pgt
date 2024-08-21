@@ -403,7 +403,7 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
     pgt_spin_lock(&pgt->lock);
 
     // TODO make proper unmapper work
-    shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size - MMU_PAGE_SIZE);
+    shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size);
 
     pgt_spin_unlock(&pgt->lock);
     return 0;
