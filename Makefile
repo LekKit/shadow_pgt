@@ -5,7 +5,7 @@ KPATH := /lib/modules/$(shell uname -r)/build
 obj-m += shadow_pgt.o
 shadow_pgt-objs := src/shadow_pgt_linux.o src/shadow_pgt.o src/shadow_pgt_riscv.o
 
-ccflags-y += -O2 -g
+ccflags-y += -O2 -g -fno-omit-frame-pointer
 
 .PHONY: all
 all:
@@ -37,5 +37,5 @@ user-warns := -Wall -Wextra -Wshadow -Wvla -Wpointer-arith -Walloca -Wduplicated
 
 .PHONY: user
 user:
-	$(CC) -O2 -g -fsanitize=address $(user-srcs) $(user-warns) -o $(NAME)
+	$(CC) -O2 -g -fno-omit-frame-pointer -fsanitize=address $(user-srcs) $(user-warns) -o $(NAME)
 	./$(NAME)
