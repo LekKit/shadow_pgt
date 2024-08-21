@@ -46,16 +46,25 @@ void pgt_debug_print(const char* str)
 
 void* pgt_alloc_pages(size_t npages)
 {
+#ifdef USE_MMAP
     void* ret = mmap(NULL, (npages << 12), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (ret == MAP_FAILED) ret = NULL;
     return ret;
+#else
+    return pgt_kvzalloc(npages << 12);
+#endif
 }
 
 void pgt_free_pages(void* ptr, size_t npages)
 {
+#ifdef USE_MMAP
     if (ptr) {
         munmap(ptr, (npages << 12));
     }
+#else
+    pgt_kvfree(ptr);
+    (void)npages;
+#endif
 }
 
 size_t pgt_virt_to_phys(void* virt)
@@ -122,6 +131,12 @@ int main()
         pgt_debug_print("shadow_pgt_init() failed!");
         return -1;
     }
+
+    struct shadow_map map = {
+        .vaddr = 0,
+        .size = ~0xFFFULL,
+    };
+    shadow_pgt_unmap(pgt, &map);
 
     shadow_pgt_free(pgt);
     return 0;
