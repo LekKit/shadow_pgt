@@ -37,5 +37,5 @@ user-warns := -Wall -Wextra -Wshadow -Wvla -Wpointer-arith -Walloca -Wduplicated
 
 .PHONY: user
 user:
-	$(CC) -O2 -g $(user-srcs) $(user-warns) -o $(NAME)
+	$(CC) -O2 -g -fsanitize=address $(user-srcs) $(user-warns) -o $(NAME)
 	./$(NAME)
