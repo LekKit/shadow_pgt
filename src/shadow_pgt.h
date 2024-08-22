@@ -112,13 +112,6 @@ struct shadow_pgt {
     // Pagetable swap host kernel <-> shadow land
     size_t shadow_satp;
     size_t satp;
-
-    // Host kernel state save while switched
-    size_t sstatus;
-    size_t sscratch;
-    size_t stvec;
-    size_t sepc;
-    size_t scounteren;
 #endif
     struct pgt_spinlock lock;
     pgt_pte_t* pagetable;
