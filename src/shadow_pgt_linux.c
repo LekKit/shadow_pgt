@@ -40,6 +40,7 @@ MODULE_LICENSE("GPL");
  * Kernel-specific wrappers
  */
 
+#include <linux/version.h>
 #include <linux/slab.h>     // kmalloc(), kfree()
 #include <linux/mm.h>       // get_user_pages_fast()
 #include <linux/highmem.h>  // kmap(), kunmap()
@@ -113,7 +114,7 @@ struct pgt_pin_page* pgt_pin_user_page(size_t uaddr, bool write)
         // Allocation failure
         return NULL;
     }
-#ifdef FOLL_LONGTERM
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
     if (pin_user_pages_fast(uaddr, 1, (write ? FOLL_WRITE : 0) | FOLL_LONGTERM, &page) != 1) {
         // Failed to pin userspace page
         pgt_kvfree(pin_page);
@@ -137,11 +138,7 @@ void pgt_release_user_page(struct pgt_pin_page* u_page)
     struct pgt_pin_page_linux* pin_page = (struct pgt_pin_page_linux*)u_page;
     kunmap(pin_page->page);
     set_page_dirty(pin_page->page);
-#ifdef FOLL_LONGTERM
-    put_user_page(pin_page->page);
-#else
     put_page(pin_page->page);
-#endif
     pgt_kvfree(pin_page);
 }
 
