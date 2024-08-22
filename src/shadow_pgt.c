@@ -27,6 +27,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define CSR_SCOUNTEREN 0x106
 #define CSR_SSCRATCH   0x140
 #define CSR_SEPC       0x141
+#define CSR_SCAUSE     0x142
 #define CSR_SATP       0x180
 
 #define CSR_SSTATUS_SIE  0x2ULL
@@ -109,12 +110,7 @@ static pgt_pte_t* pgt_alloc_page_pte(pgt_pte_t* pagetable, size_t vaddr)
     for (size_t i = SV_LEVELS; i--;) {
         size_t pgt_entry = (vaddr >> bit_off) & SV64_VPN_MASK;
         if (i == 0) {
-            if (pagetable[pgt_entry]) {
-                pgt_debug_print("Page vaddr is already claimed!");
-                return NULL;
-            } else {
-                return &pagetable[pgt_entry];
-            }
+            return &pagetable[pgt_entry];
         } else {
             void* next_pagetable = (void*)pagetable[PAGETABLE_PTES + pgt_entry];
             if (next_pagetable) {
@@ -143,16 +139,23 @@ static pgt_pte_t* pgt_alloc_page_pte(pgt_pte_t* pagetable, size_t vaddr)
 // TODO: Test this!
 static bool pgt_map_user_page(pgt_pte_t* pagetable, const struct shadow_map* map)
 {
-    struct pgt_pin_page* pin_page = pgt_pin_user_page((size_t)map->uaddr,  (map->flags & SHADOW_PGT_WRITE));
-    if (pin_page == NULL) {
-        // Failed to pin user page
-        return false;
-    }
-
     pgt_pte_t* pte = pgt_alloc_page_pte(pagetable, map->vaddr);
     if (pte == NULL) {
         // Failed to allocate PTE
-        pgt_release_user_page(pin_page);
+        return false;
+    }
+
+    pgt_pte_t pte_val = *pte;
+    if ((pte_val & MMU_VALID_PTE) && (pte_val & MMU_LEAF_PTE) && (pte_val & MMU_USER_USABLE)) {
+        // It's an existing user page, merge flags
+        // TODO: Check it's the same page?
+        *pte |= (map->flags & SHADOW_PGT_RWX);
+        return true;
+    }
+
+    struct pgt_pin_page* pin_page = pgt_pin_user_page((size_t)map->uaddr,  (map->flags & SHADOW_PGT_WRITE));
+    if (pin_page == NULL) {
+        // Failed to pin user page
         return false;
     }
 
@@ -205,6 +208,9 @@ static bool pgt_free_pagetable(pgt_pte_t* pagetable, size_t virt_start, size_t v
                     pgt_release_user_page(pin_page);
                     // Unmap user page PTE
                     pagetable[i] = 0;
+                } else {
+                    // Keep parent pageteble level - here lies a kernel-owned trampoline
+                    free_pgt_level = false;
                 }
             } else {
                 // Free pagetable level
@@ -352,7 +358,6 @@ int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
         if (vaddr != virt_pgt && vaddr != virt_code) {
             // Not overlapping kernel trampoline pages, good to go
             tmp.vaddr = vaddr;
-            pgt_free_pagetable(pgt->pagetable, vaddr, vaddr, false);
             if (!pgt_map_user_page(pgt->pagetable, &tmp)) {
                 ret = -12; // ENOMEM
             }
@@ -367,34 +372,9 @@ int shadow_pgt_map(struct shadow_pgt* pgt, const struct shadow_map* map)
     return ret;
 }
 
-static void shadow_pgt_unmap_split(struct shadow_pgt* pgt, size_t virt_start, size_t virt_end)
-{
-    size_t virt_pgt = (size_t)pgt;
-    size_t virt_code = (size_t)&shadow_pgt_trampoline_start;
-    if (virt_start <= virt_pgt && virt_end >= virt_pgt) {
-        // Split unmapping around trampoline state page
-        if (virt_start < virt_pgt) {
-            shadow_pgt_unmap_split(pgt, virt_start, virt_pgt - MMU_PAGE_SIZE);
-        }
-        if (virt_end > virt_pgt) {
-            shadow_pgt_unmap_split(pgt, virt_pgt + MMU_PAGE_SIZE, virt_end);
-        }
-    } else if (virt_start <= virt_code && virt_end >= virt_code) {
-        // Split unmapping around trampoline code page
-        if (virt_start < virt_code) {
-            shadow_pgt_unmap_split(pgt, virt_start, virt_code - MMU_PAGE_SIZE);
-        }
-        if (virt_end > virt_code) {
-            shadow_pgt_unmap_split(pgt, virt_code + MMU_PAGE_SIZE, virt_end);
-        }
-    } else {
-        pgt_free_pagetable(pgt->pagetable, virt_start, virt_end, false);
-    }
-}
-
 int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
 {
-    if ((map->size & 0xFFF) || (map->vaddr & 0xFFF) || (((size_t)map->uaddr) & 0xFFF)) {
+    if (map->vaddr & 0xFFF) {
         // Misaligned mapping
         pgt_debug_print("Misaligned mapping!");
         return -22; // EINVAL
@@ -402,39 +382,41 @@ int shadow_pgt_unmap(struct shadow_pgt* pgt, const struct shadow_map* map)
 
     pgt_spin_lock(&pgt->lock);
 
-    // TODO make proper unmapper work
-    shadow_pgt_unmap_split(pgt, map->vaddr, map->vaddr + map->size);
+    pgt_free_pagetable(pgt->pagetable, map->vaddr, map->vaddr + map->size, false);
 
     pgt_spin_unlock(&pgt->lock);
     return 0;
 }
 
-static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
+// Returns trap cause
+static size_t shadow_pgt_enter_internal(struct shadow_pgt* pgt)
 {
 #ifdef __riscv
     // Disable interrupts in current context, set return mode to U-mode
+    // Save previous sstatus
     size_t sstatus = CSR_SSTATUS_SIE | CSR_SSTATUS_SPIE | CSR_SSTATUS_SPP;
     CSR_CLEARBITS(CSR_SSTATUS, sstatus);
 
-    // Save previous sstatus
-    pgt->sstatus = sstatus;
+    //size_t fpu_enable = 0x06000;
+    //CSR_SETBITS(CSR_SSTATUS, fpu_enable);
 
     // Disable access to time CSR
-    pgt->scounteren = 0;
-    CSR_SWAP(CSR_SCOUNTEREN, pgt->scounteren);
+    // TODO: Reuse this after OpenSBI fixes their crap
+    //size_t scounteren = 0;
+    //CSR_SWAP(CSR_SCOUNTEREN, scounteren);
 
     // Save host kernel satp
     CSR_READ(CSR_SATP, pgt->satp);
 
     // Set up shadow land state
-    pgt->stvec = (size_t)shadow_pgt_trap_handler;
-    pgt->sscratch = (size_t)pgt;
-    pgt->sepc = pgt->uctx.pc;
+    size_t stvec = (size_t)shadow_pgt_trap_handler;
+    size_t sscratch = (size_t)pgt;
+    size_t sepc = pgt->uctx.pc;
 
     // Swap host kernel S-mode state with shadow land state
-    CSR_SWAP(CSR_SEPC, pgt->sepc);
-    CSR_SWAP(CSR_STVEC, pgt->stvec);
-    CSR_SWAP(CSR_SSCRATCH, pgt->sscratch);
+    CSR_SWAP(CSR_SEPC, sepc);
+    CSR_SWAP(CSR_STVEC, stvec);
+    CSR_SWAP(CSR_SSCRATCH, sscratch);
 
     // Enter asm routine to switch satp & ucontext into shadow land...
     compiler_barrier();
@@ -442,25 +424,30 @@ static void shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     compiler_barrier();
 
     // Restore host kernel S-mode state
-    CSR_WRITE(CSR_STVEC, pgt->stvec);
-
-    size_t sscratch = pgt->sscratch;
-    CSR_SWAP(CSR_SSCRATCH, sscratch);
+    CSR_WRITE(CSR_STVEC, stvec);
 
     // sscratch held guest a0
-    pgt->uctx.xreg[9] = sscratch;
+    size_t a0 = sscratch;
+    CSR_SWAP(CSR_SSCRATCH, a0);
+
+    pgt->uctx.xreg[9] = a0;
 
     // sepc held guest pc
-    CSR_SWAP(CSR_SEPC, pgt->sepc);
-    pgt->uctx.pc = pgt->sepc;
+    CSR_SWAP(CSR_SEPC, sepc);
+    pgt->uctx.pc = sepc;
 
     // Restore scounteren
-    CSR_WRITE(CSR_SCOUNTEREN, pgt->scounteren);
+    //CSR_WRITE(CSR_SCOUNTEREN, scounteren);
+
+    size_t scause = 0;
+    CSR_READ(CSR_SCAUSE, scause);
 
     // Restore actual initial host kernel sstatus
-    CSR_WRITE(CSR_SSTATUS, pgt->sstatus);
+    CSR_WRITE(CSR_SSTATUS, sstatus);
+    return scause;
 #else
     (void)pgt;
+    return 0;
 #endif
 }
 
