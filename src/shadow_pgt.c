@@ -153,7 +153,7 @@ static bool pgt_map_user_page(pgt_pte_t* pagetable, const struct shadow_map* map
         return true;
     }
 
-    struct pgt_pin_page* pin_page = pgt_pin_user_page((size_t)map->uaddr,  (map->flags & SHADOW_PGT_WRITE));
+    struct pgt_pin_page* pin_page = pgt_pin_user_page((size_t)map->uaddr, true);
     if (pin_page == NULL) {
         // Failed to pin user page
         return false;
@@ -397,8 +397,9 @@ static size_t shadow_pgt_enter_internal(struct shadow_pgt* pgt)
     size_t sstatus = CSR_SSTATUS_SIE | CSR_SSTATUS_SPIE | CSR_SSTATUS_SPP;
     CSR_CLEARBITS(CSR_SSTATUS, sstatus);
 
-    //size_t fpu_enable = 0x06000;
-    //CSR_SETBITS(CSR_SSTATUS, fpu_enable);
+    // Enable FPU
+    size_t fpu_enable = 0x06000;
+    CSR_SETBITS(CSR_SSTATUS, fpu_enable);
 
     // Disable access to time CSR
     // TODO: Reuse this after OpenSBI fixes their crap
